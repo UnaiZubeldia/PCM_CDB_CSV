@@ -1,6 +1,6 @@
 # CDB to CSV Converter
 
-A simple Python script to convert .cdb database files to CSV format using XML as an intermediate format.
+A simple Python script to convert PRO CYCLING MANAGER .cdb database files to CSV format using XML as an intermediate format.
 
 ## Features
 
