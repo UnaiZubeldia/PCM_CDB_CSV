@@ -36,12 +36,34 @@ def export_to_xml(input_file, output_file, script_dir):
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
         
-def xml_to_df(file_path):
+def calculate_age(birthdate):
+    """
+    Calculate age from birthdate in YYYYMMDD format.
+    
+    Args:
+        birthdate: Birthdate in YYYYMMDD format
+        
+    Returns:
+        int: Age in years, or None if invalid
+    """
+    if pd.isna(birthdate):
+        return None
+    try:
+        from datetime import datetime
+        birth_date = datetime.strptime(str(int(birthdate)), '%Y%m%d')
+        today = datetime.now()
+        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+        return age
+    except (ValueError, TypeError):
+        return None
+
+def xml_to_df(file_path, table_name=None):
     """
     Convert XML file to pandas DataFrame.
     
     Args:
         file_path (str): Path to the XML file
+        table_name (str): Specific table name to extract. If None, finds first table with data.
         
     Returns:
         pd.DataFrame: DataFrame containing the table data
@@ -50,11 +72,27 @@ def xml_to_df(file_path):
         ValueError: If no table is found in the XML file
     """
     tree = ET.parse(file_path)
-    table = tree.find('.//Table')
+    root = tree.getroot()
+    
+    if table_name:
+        # Find specific table by TableName attribute
+        table = root.find(f".//Table[@TableName='{table_name}']")
+    else:
+        # Find first table with data (NumRows > 0)
+        table = None
+        for t in root.findall('.//Table'):
+            num_rows = t.get('NumRows')
+            if num_rows and int(num_rows) > 0:
+                table = t
+                break
+    
     if table is None:
-        raise ValueError("No table found in XML file.")
+        if table_name:
+            raise ValueError(f"Table with TableName='{table_name}' not found in the XML file.")
+        else:
+            raise ValueError("No table with data found in XML file.")
 
-    # Extract column names and data more efficiently
+    # Extract column names and data
     columns = []
     data = []
     
@@ -62,13 +100,107 @@ def xml_to_df(file_path):
         column_name = col.get('ColumnName')
         if column_name:
             columns.append(column_name)
-            data.append([cell.text for cell in col.findall('Cell')])
+            cells = [cell.text if cell.text is not None else None for cell in col.findall('Cell')]
+            data.append(cells)
 
-    # Ensure all columns have the same length
+    # Find the maximum row length
     if data:
         max_length = max(len(col_data) for col_data in data)
-        data = [col_data + [None] * (max_length - len(col_data)) for col_data in data]
-        return pd.DataFrame(dict(zip(columns, data)))
+        # Pad columns with None to ensure consistent row lengths
+        padded_data = [col_data + [None] * (max_length - len(col_data)) for col_data in data]
+        # Transpose the data to match DataFrame structure
+        transposed_data = list(map(list, zip(*padded_data)))
+        return pd.DataFrame(transposed_data, columns=columns)
+    
+    return pd.DataFrame()
+
+def cyclist_and_team_data(xml_path):
+    """
+    Extract and merge cyclist and team data similar to old_wdb_to_csv.py.
+    
+    Args:
+        xml_path (str): Path to the XML file
+        
+    Returns:
+        pd.DataFrame: Merged DataFrame with cyclist and team data
+    """
+    # Get cyclist data
+    cyclists_df = xml_to_df(xml_path, 'DYN_cyclist')
+    
+    # Get team data
+    teams_df = xml_to_df(xml_path, 'DYN_team')
+    
+    # Select relevant team columns (IDteam, gene_sz_shortname, gene_sz_name)
+    team_cols = ['IDteam']
+    if 'gene_sz_shortname' in teams_df.columns:
+        team_cols.append('gene_sz_shortname')
+    if 'gene_sz_name' in teams_df.columns:
+        team_cols.append('gene_sz_name')
+    
+    teams_df = teams_df[team_cols]
+    
+    # Merge cyclist and team data
+    full_db = cyclists_df.merge(teams_df, left_on='fkIDteam', right_on='IDteam', how='left')
+    
+    # Convert birthdate to age if birthdate column exists
+    if 'gene_i_birthdate' in full_db.columns:
+        full_db['age'] = full_db['gene_i_birthdate'].apply(calculate_age)
+    
+    # Return all columns (no filtering)
+    return full_db
+    """
+    Convert XML file to pandas DataFrame.
+    
+    Args:
+        file_path (str): Path to the XML file
+        table_name (str): Specific table name to extract. If None, finds first table with data.
+        
+    Returns:
+        pd.DataFrame: DataFrame containing the table data
+        
+    Raises:
+        ValueError: If no table is found in the XML file
+    """
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+    
+    if table_name:
+        # Find specific table by TableName attribute
+        table = root.find(f".//Table[@TableName='{table_name}']")
+    else:
+        # Find first table with data (NumRows > 0)
+        table = None
+        for t in root.findall('.//Table'):
+            num_rows = t.get('NumRows')
+            if num_rows and int(num_rows) > 0:
+                table = t
+                break
+    
+    if table is None:
+        if table_name:
+            raise ValueError(f"Table with TableName='{table_name}' not found in the XML file.")
+        else:
+            raise ValueError("No table with data found in XML file.")
+
+    # Extract column names and data
+    columns = []
+    data = []
+    
+    for col in table.findall('Column'):
+        column_name = col.get('ColumnName')
+        if column_name:
+            columns.append(column_name)
+            cells = [cell.text if cell.text is not None else None for cell in col.findall('Cell')]
+            data.append(cells)
+
+    # Find the maximum row length
+    if data:
+        max_length = max(len(col_data) for col_data in data)
+        # Pad columns with None to ensure consistent row lengths
+        padded_data = [col_data + [None] * (max_length - len(col_data)) for col_data in data]
+        # Transpose the data to match DataFrame structure
+        transposed_data = list(map(list, zip(*padded_data)))
+        return pd.DataFrame(transposed_data, columns=columns)
     
     return pd.DataFrame()
         
@@ -99,10 +231,11 @@ def main():
         
         if export_to_xml(cdb_path.name, xml_path.name, str(script_dir)):
             try:
-                df = xml_to_df(str(xml_path))
+                # Use cyclist_and_team_data function for cyclist-specific extraction
+                df = cyclist_and_team_data(str(xml_path))
                 df.to_csv(str(csv_path), index=False)
                 xml_path.unlink()  # Clean up intermediate XML
-                print(f"✓ Converted to {csv_path.name}")
+                print(f"✓ Converted to {csv_path.name} ({len(df)} cyclists)")
             except Exception as e:
                 print(f"✗ Failed to convert: {e}")
                 if xml_path.exists():
